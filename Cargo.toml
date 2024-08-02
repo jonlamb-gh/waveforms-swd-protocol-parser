@@ -7,3 +7,4 @@ edition = "2021"
 clap = { version = "4.5", features = ["derive", "env", "color"] }
 nom = "7"
 bitfield = "0.16"
+colored = "2.1"

@@ -1,5 +1,7 @@
-use crate::parser::{AccessRegister, Direction, SwdOperation};
+use crate::parser::{AccessRegister, Direction};
 use clap::Parser;
+use colored::Colorize;
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
@@ -14,6 +16,13 @@ struct Opts {
     pub input: PathBuf,
 }
 
+// S32K344 specifics
+const APB_AP_ID: u8 = 1;
+const CM7_0_AHB_AP_ID: u8 = 4;
+const MDM_AP_ID: u8 = 6;
+const SDA_AP_ID: u8 = 7;
+const S32K3XX_AP_IDS: [u8; 4] = [APB_AP_ID, CM7_0_AHB_AP_ID, MDM_AP_ID, SDA_AP_ID];
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let opts = Opts::parse();
 
@@ -23,7 +32,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut line_buf = String::new();
 
+    let mut observed_aps = HashSet::new();
+
     let mut dp_select_reg = dp_regs::Select(0);
+    let mut tar_reg = ap_regs::Tar(0);
 
     loop {
         line_buf.clear();
@@ -41,7 +53,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             match op.direction {
                 Direction::Read => print!("<-- "),
-                Direction::Write => print!("--> "),
+                Direction::Write => print!("{} ", "-->".yellow().bold()),
             }
 
             match op.access {
@@ -105,23 +117,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // 0x08
                         dp_regs::Select::ADDRESS if op.direction == Direction::Write => {
                             let select = dp_regs::Select(op.data);
+
+                            observed_aps.insert(select.apsel() as u8);
+
+                            let mut apsel = format!("{:02X}", select.apsel()).normal();
+                            if select.apsel() as u8 == MDM_AP_ID
+                                || select.apsel() as u8 == SDA_AP_ID
+                            {
+                                apsel = apsel.bright_red();
+                            } else if S32K3XX_AP_IDS.contains(&(select.apsel() as u8)) {
+                                apsel = apsel.bright_yellow();
+                            }
+
+                            let s32k3xx_ap = match select.apsel() as u8 {
+                                APB_AP_ID => "    (APB_AP)",
+                                CM7_0_AHB_AP_ID => "    (CM7_0_AHB_AP)",
+                                MDM_AP_ID => "    (MDM_AP)",
+                                SDA_AP_ID => "    (SDA_API)",
+                                _ => "",
+                            };
+
                             print!(
-                                " {}    APSEL:{:02X} APBANKSEL:{:02X} CTRLSEL:{}",
+                                " {}    APSEL:{} APBANKSEL:{:02X} CTRLSEL:{}{}",
                                 dp_regs::Select::NAME,
-                                select.apsel(),
+                                //select.apsel()
+                                apsel,
                                 select.apbanksel(),
                                 if select.ctrlsel() { 1 } else { 0 },
+                                s32k3xx_ap,
                             );
                             // TODO is this right?
                             dp_select_reg = select;
                         }
                         dp_regs::Resend::ADDRESS if op.direction == Direction::Read => {
-                            print!(" {}    DATA:{:X}", dp_regs::Resend::NAME, op.data);
+                            print!(" {}    {:08X}", dp_regs::Resend::NAME, op.data);
                         }
 
                         // 0x0C
                         dp_regs::RdBuff::ADDRESS if op.direction == Direction::Read => {
-                            print!(" {}    DATA:{:X}", dp_regs::RdBuff::NAME, op.data);
+                            print!(" {}    {:08X}", dp_regs::RdBuff::NAME, op.data);
                         }
 
                         _ => {
@@ -131,12 +165,109 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
                 AccessRegister::AccessPort => {
                     let address = mem_ap_address(dp_select_reg.apbanksel() as u8, op.address_2_3);
-                    print!("R:{:02X}", address);
+
+                    let is_32k3xx = dp_select_reg.apsel() as u8 == MDM_AP_ID
+                        || dp_select_reg.apsel() as u8 == SDA_AP_ID;
+
+                    if is_32k3xx {
+                        print!("R:{}", format!("{:02X}", address).bright_red());
+                    } else {
+                        print!("R:{:02X}", address);
+                    }
+
+                    if !is_32k3xx {
+                        match address {
+                            ap_regs::Idr::ADDRESS => {
+                                print!(" {}       {:08X}", ap_regs::Idr::NAME, op.data);
+                            }
+                            ap_regs::Tar::ADDRESS => {
+                                tar_reg.set_addr(op.data);
+                                print!(" {}       {:08X}", ap_regs::Tar::NAME, op.data);
+                            }
+                            ap_regs::Csw::ADDRESS => {
+                                print!(" {}       {:08X}", ap_regs::Csw::NAME, op.data);
+                            }
+                            ap_regs::Drw::ADDRESS => {
+                                print!(" {}       {:08X}", ap_regs::Drw::NAME, op.data);
+
+                                match tar_reg.addr() {
+                                    arm_regs::Dhcsr::ADDRESS => {
+                                        let dhcsr = arm_regs::Dhcsr(op.data);
+                                        print!("    ");
+                                        dhcsr.min_print();
+                                        print!("\n{:?}", dhcsr);
+                                    }
+                                    arm_regs::Demcr::ADDRESS => {
+                                        let demcr = arm_regs::Demcr(op.data);
+                                        print!("    ");
+                                        demcr.min_print();
+                                        print!("\n{:?}", demcr);
+                                    }
+                                    _ => (),
+                                }
+                            }
+                            ap_regs::Bd0::ADDRESS => {
+                                print!(" {}       {:08X}", ap_regs::Bd0::NAME, op.data);
+                                match tar_reg.addr() {
+                                    arm_regs::Dhcsr::ADDRESS => {
+                                        let dhcsr = arm_regs::Dhcsr(op.data);
+                                        print!("    ");
+                                        dhcsr.min_print();
+                                        print!("\n{:?}", dhcsr);
+                                    }
+                                    arm_regs::Demcr::ADDRESS => {
+                                        let demcr = arm_regs::Demcr(op.data);
+                                        print!("    ");
+                                        demcr.min_print();
+                                        print!("\n{:?}", demcr);
+                                    }
+                                    _ => (),
+                                }
+                            }
+                            ap_regs::Bd1::ADDRESS => {
+                                print!(" {}       {:08X}", ap_regs::Bd1::NAME, op.data);
+                            }
+                            ap_regs::Bd2::ADDRESS => {
+                                print!(" {}       {:08X}", ap_regs::Bd2::NAME, op.data);
+                            }
+                            ap_regs::Bd3::ADDRESS => {
+                                print!(" {}       {:08X}", ap_regs::Bd3::NAME, op.data);
+                            }
+                            _ => {
+                                print!("           {:08X}", op.data);
+                            }
+                        }
+                    } else {
+                        print!("           {:08X}", op.data);
+                        // is S32K344
+                        if dp_select_reg.apsel() as u8 == SDA_AP_ID {
+                            match address {
+                                0x80 => print!(
+                                    "                           ({})",
+                                    "DBGENCTRL".bright_red()
+                                ),
+                                0x90 => print!(
+                                    "                           ({})",
+                                    "SDAAPRSTCTRL".bright_red()
+                                ),
+                                0xFC => {
+                                    print!("                           ({})", "ID".bright_red())
+                                }
+                                _ => print!("                           ({})", "TODO add reg"),
+                            }
+                        }
+                    }
                 }
             }
         }
 
         println!();
+    }
+
+    println!("---------------------------------------------------");
+    println!("Observed APs:");
+    for ap in observed_aps.into_iter() {
+        println!("  {} (0x:{:02X})", ap, ap);
     }
 
     Ok(())
@@ -246,6 +377,184 @@ mod dp_regs {
     impl RdBuff {
         pub const ADDRESS: u8 = 0x0C;
         pub const NAME: &'static str = "RDBUFF";
+    }
+}
+
+mod ap_regs {
+    use bitfield::bitfield;
+
+    bitfield! {
+        #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+        pub struct Csw(u32);
+    }
+
+    impl Csw {
+        pub const ADDRESS: u8 = 0x00;
+        pub const NAME: &'static str = "CSW";
+    }
+
+    bitfield! {
+        #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+        pub struct Tar(u32);
+        pub addr, set_addr : 31, 0;
+    }
+
+    impl Tar {
+        pub const ADDRESS: u8 = 0x04;
+        pub const NAME: &'static str = "TAR";
+    }
+
+    bitfield! {
+        #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+        pub struct Drw(u32);
+    }
+
+    impl Drw {
+        pub const ADDRESS: u8 = 0x0C;
+        pub const NAME: &'static str = "DRW";
+    }
+
+    bitfield! {
+        #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+        pub struct Bd0(u32);
+    }
+
+    impl Bd0 {
+        pub const ADDRESS: u8 = 0x10;
+        pub const NAME: &'static str = "BD0";
+    }
+
+    bitfield! {
+        #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+        pub struct Bd1(u32);
+    }
+
+    impl Bd1 {
+        pub const ADDRESS: u8 = 0x14;
+        pub const NAME: &'static str = "BD1";
+    }
+
+    bitfield! {
+        #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+        pub struct Bd2(u32);
+    }
+
+    impl Bd2 {
+        pub const ADDRESS: u8 = 0x18;
+        pub const NAME: &'static str = "BD2";
+    }
+
+    bitfield! {
+        #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+        pub struct Bd3(u32);
+    }
+
+    impl Bd3 {
+        pub const ADDRESS: u8 = 0x1C;
+        pub const NAME: &'static str = "BD3";
+    }
+
+    bitfield! {
+        #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash, Debug)]
+        pub struct Idr(u32);
+    }
+
+    impl Idr {
+        pub const ADDRESS: u8 = 0xFC;
+        pub const NAME: &'static str = "IDR";
+    }
+}
+
+mod arm_regs {
+    use bitfield::bitfield;
+    use colored::Colorize;
+
+    bitfield! {
+        #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+        pub struct Dhcsr(u32);
+        impl Debug;
+        pub s_reset_st, _: 25;
+        pub s_retire_st, _: 24;
+        pub s_lockup, _: 19;
+        pub s_sleep, _: 18;
+        pub s_halt, _: 17;
+        pub s_regrdy, _: 16;
+        pub c_maskints, set_c_maskints: 3;
+        pub c_step, set_c_step: 2;
+        pub c_halt, set_c_halt: 1;
+        pub c_debugen, set_c_debugen: 0;
+    }
+
+    impl Dhcsr {
+        pub const ADDRESS: u32 = 0xE000_EDF0;
+        pub const NAME: &'static str = "DHCSR";
+    }
+
+    impl Dhcsr {
+        pub fn min_print(&self) {
+            print!(
+                "{} (s_reset_st:{}, s_halt:{}, c_halt:{}, c_debugen:{})",
+                Self::NAME.bright_blue(),
+                self.s_reset_st() as u8,
+                self.s_halt() as u8,
+                self.c_halt() as u8,
+                self.c_debugen() as u8,
+            );
+        }
+    }
+
+    bitfield! {
+        /// Debug Exception and Monitor Control Register, DEMCR (see armv7-M Architecture Reference Manual C1.6.5)
+        #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+        pub struct Demcr(u32);
+        impl Debug;
+        /// Global enable for DWT and ITM features
+        pub trcena, set_trcena: 24;
+        /// DebugMonitor semaphore bit
+        pub mon_req, set_mon_req: 19;
+        /// Step the processor?
+        pub mon_step, set_mon_step: 18;
+        /// Sets or clears the pending state of the DebugMonitor exception
+        pub mon_pend, set_mon_pend: 17;
+        /// Enable the DebugMonitor exception
+        pub mon_en, set_mon_en: 16;
+        /// Enable halting debug trap on a HardFault exception
+        pub vc_harderr, set_vc_harderr: 10;
+        /// Enable halting debug trap on a fault occurring during exception entry
+        /// or exception return
+        pub vc_interr, set_vc_interr: 9;
+        /// Enable halting debug trap on a BusFault exception
+        pub vc_buserr, set_vc_buserr: 8;
+        /// Enable halting debug trap on a UsageFault exception caused by a state
+        /// information error, for example an Undefined Instruction exception
+        pub vc_staterr, set_vc_staterr: 7;
+        /// Enable halting debug trap on a UsageFault exception caused by a
+        /// checking error, for example an alignment check error
+        pub vc_chkerr, set_vc_chkerr: 6;
+        /// Enable halting debug trap on a UsageFault caused by an access to a
+        /// Coprocessor
+        pub vc_nocperr, set_vc_nocperr: 5;
+        /// Enable halting debug trap on a MemManage exception.
+        pub vc_mmerr, set_vc_mmerr: 4;
+        /// Enable Reset Vector Catch
+        pub vc_corereset, set_vc_corereset: 0;
+    }
+
+    impl Demcr {
+        pub const ADDRESS: u32 = 0xE000_EDFC;
+        pub const NAME: &'static str = "DEMCR";
+    }
+
+    impl Demcr {
+        pub fn min_print(&self) {
+            print!(
+                "{} (trcena:{}, vc_harderr:{}, vc_corereset:{})",
+                Self::NAME.bright_blue(),
+                self.trcena() as u8,
+                self.vc_harderr() as u8,
+                self.vc_corereset() as u8,
+            );
+        }
     }
 }
 
