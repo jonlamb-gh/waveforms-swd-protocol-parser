@@ -195,13 +195,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         let dhcsr = arm_regs::Dhcsr(op.data);
                                         print!("    ");
                                         dhcsr.min_print();
-                                        print!("\n{:?}", dhcsr);
+                                        //print!("\n{:?}", dhcsr);
                                     }
                                     arm_regs::Demcr::ADDRESS => {
                                         let demcr = arm_regs::Demcr(op.data);
                                         print!("    ");
                                         demcr.min_print();
-                                        print!("\n{:?}", demcr);
+                                        //print!("\n{:?}", demcr);
+                                    }
+                                    arm_regs::Aircr::ADDRESS => {
+                                        let reg = arm_regs::Aircr(op.data);
+                                        print!("    ");
+                                        reg.min_print();
+                                        //print!("\n{:?}", reg);
                                     }
                                     _ => (),
                                 }
@@ -213,13 +219,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         let dhcsr = arm_regs::Dhcsr(op.data);
                                         print!("    ");
                                         dhcsr.min_print();
-                                        print!("\n{:?}", dhcsr);
+                                        //print!("\n{:?}", dhcsr);
                                     }
                                     arm_regs::Demcr::ADDRESS => {
                                         let demcr = arm_regs::Demcr(op.data);
                                         print!("    ");
                                         demcr.min_print();
-                                        print!("\n{:?}", demcr);
+                                        //print!("\n{:?}", demcr);
+                                    }
+                                    arm_regs::Aircr::ADDRESS => {
+                                        let reg = arm_regs::Aircr(op.data);
+                                        print!("    ");
+                                        reg.min_print();
+                                        //print!("\n{:?}", reg);
                                     }
                                     _ => (),
                                 }
@@ -553,6 +565,80 @@ mod arm_regs {
                 self.trcena() as u8,
                 self.vc_harderr() as u8,
                 self.vc_corereset() as u8,
+            );
+        }
+    }
+
+    bitfield! {
+        /// Application Interrupt and Reset Control Register, AIRCR (see armv7-M Architecture Reference Manual B3.2.6)
+        ///
+        /// [`Aircr::vectkey`] must be called before this register can effectively be written!
+        #[derive(Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
+        pub struct Aircr(u32);
+        impl Debug;
+        /// Vector Key. The value 0x05FA must be written to this register, otherwise
+        /// the register write is UNPREDICTABLE.
+        get_vectkeystat, set_vectkey: 31,16;
+        /// Indicates the memory system data endianness:
+        ///
+        /// `0`: little endian.\
+        /// `1`: big endian.
+        ///
+        /// See Endian support on page A3-44 for more information.
+        pub endianness, set_endianness: 15;
+        /// Priority grouping, indicates the binary point position.
+        ///
+        /// For information about the use of this field see Priority grouping on page B1-527.
+        ///
+        /// This field resets to `0b000`.
+        pub prigroup, set_prigroup: 10,8;
+        /// System Reset Request:
+        ///
+        /// `0`: do not request a reset.\
+        /// `1`: request reset.
+        ///
+        /// Writing `1` to this bit asserts a signal to request a reset by the external
+        /// system. The system components that are reset by this request are
+        /// IMPLEMENTATION DEFINED. A Local reset is required as part of a system
+        /// reset request.
+        ///
+        /// A Local reset clears this bit to `0`.
+        ///
+        /// See Reset management on page B1-208 for more information
+        pub sysresetreq, set_sysresetreq: 2;
+        /// Clears all active state information for fixed and configurable exceptions:
+        ///
+        /// `0`: do not clear state information.\
+        /// `1`: clear state information.
+        ///
+        /// The effect of writing a `1` to this bit if the processor is not halted in Debug
+        /// state is UNPREDICTABLE.
+        pub vectclractive, set_vectclractive: 1;
+        /// Writing `1` to this bit causes a local system reset, see Reset management on page B1-559 for
+        /// more information. This bit self-clears.
+        ///
+        /// The effect of writing a `1` to this bit if the processor is not halted in Debug state is UNPREDICTABLE.
+        ///
+        /// When the processor is halted in Debug state, if a write to the register writes a `1` to both
+        /// VECTRESET and SYSRESETREQ, the behavior is UNPREDICTABLE.
+        ///
+        /// This bit is write only.
+        pub vectreset, set_vectreset: 0;
+    }
+
+    impl Aircr {
+        pub const ADDRESS: u32 = 0xE000_ED0C;
+        pub const NAME: &'static str = "AIRCR";
+    }
+
+    impl Aircr {
+        pub fn min_print(&self) {
+            print!(
+                "{} (sysresetreq:{}, vectclractive:{}, vectreset:{})",
+                Self::NAME.bright_blue(),
+                self.sysresetreq() as u8,
+                self.vectclractive() as u8,
+                self.vectreset() as u8,
             );
         }
     }
